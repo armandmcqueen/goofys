@@ -15,7 +15,7 @@
 package internal
 
 import (
-	. "github.com/kahing/goofys/api/common"
+	. "github.com/armandmcqueen/goofys/api/common"
 	. "gopkg.in/check.v1"
 
 	"fmt"
