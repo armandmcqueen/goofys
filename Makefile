@@ -10,7 +10,11 @@ get-deps: s3proxy.jar
 	go get -t ./...
 
 build:
-	go build -ldflags "-X main.Version=`git rev-parse HEAD`"
+	go build -ldflags "-X main.Version=`git rev-parse HEAD`" -o datasetfs
 
 install:
 	go install -ldflags "-X main.Version=`git rev-parse HEAD`"
+
+test: build
+	@echo "Starting tests"
+	@./datasetfs
