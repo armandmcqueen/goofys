@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/client"
@@ -131,6 +132,73 @@ func (c *S3Config) ToAwsConfig(flags *FlagStorage) (*aws.Config, error) {
 
 	return awsConfig, nil
 }
+
+
+func (c *S3Config) ToAwsConfigNoFlags(debug bool) (*aws.Config, error) {
+	awsConfig := (&aws.Config{
+		Region: &c.Region,
+		Logger: GetLogger("s3"),
+	}).WithHTTPClient(&http.Client{
+		Transport: &defaultHTTPTransport,
+		Timeout:   30 * time.Second,
+	})
+	if debug {
+		awsConfig.LogLevel = aws.LogLevel(aws.LogDebug | aws.LogDebugWithRequestErrors)
+	}
+
+	if c.Credentials == nil {
+		if c.AccessKey != "" {
+			c.Credentials = credentials.NewStaticCredentials(c.AccessKey, c.SecretKey, "")
+		} else {
+			panic("No creds available. The fuck is going on?!?")
+		}
+	}
+
+	awsConfig.S3ForcePathStyle = aws.Bool(!c.Subdomain)
+
+	if c.Session == nil {
+		if s3Session == nil {
+			var err error
+			s3Session, err = session.NewSessionWithOptions(session.Options{
+				Profile:           c.Profile,
+				SharedConfigState: session.SharedConfigEnable,
+			})
+			if err != nil {
+				return nil, err
+			}
+		}
+		c.Session = s3Session
+	}
+
+	// TODO(armand): Reenable role-based auth
+	//if c.RoleArn != "" {
+	//	c.Credentials = stscreds.NewCredentials(stsConfigProvider{c}, c.RoleArn,
+	//		func(p *stscreds.AssumeRoleProvider) {
+	//			if c.RoleExternalId != "" {
+	//				p.ExternalID = &c.RoleExternalId
+	//			}
+	//			p.RoleSessionName = c.RoleSessionName
+	//		})
+	//}
+
+	if c.Credentials != nil {
+		awsConfig.Credentials = c.Credentials
+	}
+
+	if c.SseC != "" {
+		key, err := base64.StdEncoding.DecodeString(c.SseC)
+		if err != nil {
+			return nil, fmt.Errorf("sse-c is not base64-encoded: %v", err)
+		}
+
+		c.SseC = string(key)
+		m := md5.Sum(key)
+		c.SseCDigest = base64.StdEncoding.EncodeToString(m[:])
+	}
+
+	return awsConfig, nil
+}
+
 
 type stsConfigProvider struct {
 	*S3Config

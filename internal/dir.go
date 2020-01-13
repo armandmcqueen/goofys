@@ -1326,13 +1326,8 @@ func (parent *Inode) LookUpInodeMaybeDir(name string, fullName string) (inode *I
 	}
 
 	go parent.LookUpInodeNotDir(name, objectChan, errObjectChan)
-	if !cloud.Capabilities().DirBlob && !parent.fs.flags.Cheap {
+	if !cloud.Capabilities().DirBlob {
 		go parent.LookUpInodeNotDir(name+"/", objectChan, errDirBlobChan)
-		if !parent.fs.flags.ExplicitDir {
-			errDirChan = make(chan error, 1)
-			dirChan = make(chan ListBlobsOutput, 1)
-			go parent.LookUpInodeDir(name, dirChan, errDirChan)
-		}
 	}
 
 	for {

@@ -41,7 +41,7 @@ type InodeAttributes struct {
 type Inode struct {
 	Id         fuseops.InodeID
 	Name       *string
-	fs         *Goofys
+	fs         *DatasetFS
 	Attributes InodeAttributes
 	KnownSize  *uint64
 	// It is generally safe to read `AttrTime` without locking because if some other
@@ -76,7 +76,7 @@ type Inode struct {
 	refcnt uint64
 }
 
-func NewInode(fs *Goofys, parent *Inode, name *string) (inode *Inode) {
+func NewInode(fs *DatasetFS, parent *Inode, name *string) (inode *Inode) {
 	if strings.Index(*name, "/") != -1 {
 		fuseLog.Errorf("%v is not a valid name", *name)
 	}
