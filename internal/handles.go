@@ -58,7 +58,7 @@ type Inode struct {
 
 	// We are not very consistent about enforcing locks for `Parent` because, the
 	// parent field very very rarely changes and it is generally fine to operate on
-	// stale parent informaiton
+	// stale parent information
 	Parent *Inode
 
 	dir *DirInodeData

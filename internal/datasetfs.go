@@ -354,49 +354,30 @@ func (fs *DatasetFS) allocateInodeId() (id fuseops.InodeID) {
 }
 
 
+// LookUpInode is implemented assuming that initialization is complete (i.e.
+// the inode tree does not change)
 func (fs *DatasetFS) LookUpInode(
 	ctx context.Context,
 	op *fuseops.LookUpInodeOp) (err error) {
 
 	var inode *Inode
-	var inodeExists bool
 	defer func() { fuseLog.Debugf("<-- LookUpInode %v %v %v", op.Parent, op.Name, err) }()
 
+	// Get inode of Parent given ParentInodeId
 	fs.mu.RLock()
 	parent := fs.getInodeOrDie(op.Parent)
 	fs.mu.RUnlock()
 
+	// Find the inode for the appropriate child.
 	parent.mu.Lock()
 	inode = parent.findChildUnlocked(op.Name)
 	if inode != nil {
-		inodeExists = true
 		inode.Ref()
 	} else {
-		inodeExists = false
+		return fuse.ENOENT
 	}
 	parent.mu.Unlock()
 
-	if !inodeExists {
-		var newInode *Inode
-
-		newInode, err = parent.LookUp(op.Name)
-		if err != nil {
-			return err
-		}
-
-		parent.mu.Lock()
-		// check again if it's there, could have been
-		// added by another lookup or readdir
-		inode = parent.findChildUnlocked(op.Name)
-		if inode == nil {
-			fs.mu.Lock()
-			inode = newInode
-			fs.insertInode(parent, inode)
-			fs.mu.Unlock()
-		}
-		parent.mu.Unlock()
-
-	}
 
 	op.Entry.Child = inode.Id
 	op.Entry.Attributes = inode.InflateAttributes()
@@ -448,34 +429,7 @@ func (fs *DatasetFS) addDotAndDotDot(dir *Inode) {
 	fs.insertInode(dir, dot)
 }
 
-func (fs *DatasetFS) ForgetInode(
-	ctx context.Context,
-	op *fuseops.ForgetInodeOp) (err error) {
 
-	fs.mu.RLock()
-	inode := fs.getInodeOrDie(op.Inode)
-	fs.mu.RUnlock()
-
-	if inode.Parent != nil {
-		inode.Parent.mu.Lock()
-		defer inode.Parent.mu.Unlock()
-	}
-	stale := inode.DeRef(op.N)
-
-	if stale {
-		fs.mu.Lock()
-		defer fs.mu.Unlock()
-
-		delete(fs.inodes, op.Inode)
-		fs.forgotCnt += 1
-
-		if inode.Parent != nil {
-			inode.Parent.removeChildUnlocked(inode)
-		}
-	}
-
-	return
-}
 
 func (fs *DatasetFS) OpenDir(
 	ctx context.Context,
@@ -603,21 +557,6 @@ func (fs *DatasetFS) ReadFile(
 	return
 }
 
-func (fs *DatasetFS) SyncFile(
-	ctx context.Context,
-	op *fuseops.SyncFileOp) (err error) {
-
-	// intentionally ignored, so that write()/sync()/write() works
-	// see https://github.com/kahing/goofys/issues/154
-	return
-}
-
-func (fs *DatasetFS) FlushFile(
-	ctx context.Context,
-	op *fuseops.FlushFileOp) (err error) {
-
-	return
-}
 
 func (fs *DatasetFS) ReleaseFileHandle(
 	ctx context.Context,
@@ -636,6 +575,8 @@ func (fs *DatasetFS) ReleaseFileHandle(
 	return
 }
 
+
+
 func (fs *DatasetFS) SetInodeAttributes(
 	ctx context.Context,
 	op *fuseops.SetInodeAttributesOp) (err error) {
@@ -651,6 +592,40 @@ func (fs *DatasetFS) SetInodeAttributes(
 	}
 	return
 }
+
+
+
+
+
+// Below this are no-op operations
+
+func (fs *DatasetFS) SyncFile(
+	ctx context.Context,
+	op *fuseops.SyncFileOp) (err error) {
+
+	// intentionally ignored, so that write()/sync()/write() works
+	// see https://github.com/kahing/goofys/issues/154
+	return
+}
+
+
+func (fs *DatasetFS) ForgetInode(
+	ctx context.Context,
+	op *fuseops.ForgetInodeOp) (err error) {
+
+	return
+}
+
+func (fs *DatasetFS) FlushFile(
+	ctx context.Context,
+	op *fuseops.FlushFileOp) (err error) {
+
+	return
+}
+
+
+
+
 
 
 
