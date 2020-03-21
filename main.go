@@ -16,7 +16,7 @@
 package main
 
 import (
-	goofys "github.com/armandmcqueen/goofys/api"
+	datasetfs "github.com/armandmcqueen/goofys/api"
 	. "github.com/armandmcqueen/goofys/api/common"
 	. "github.com/armandmcqueen/goofys/internal"
 
@@ -39,7 +39,7 @@ import (
 
 var log = GetLogger("main")
 
-func registerSIGINTHandler(fs *Goofys, flags *FlagStorage) {
+func registerSIGINTHandler(fs *DatasetFS, flags *FlagStorage) {
 	// Register for SIGINT.
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM, syscall.SIGUSR1)
@@ -106,9 +106,9 @@ func kill(pid int, s os.Signal) (err error) {
 func mount(
 	ctx context.Context,
 	bucketName string,
-	flags *FlagStorage) (fs *Goofys, mfs *fuse.MountedFileSystem, err error) {
+	flags *FlagStorage) (fs *DatasetFS, mfs *fuse.MountedFileSystem, err error) {
 
-	return goofys.Mount(ctx, bucketName, flags)
+	return datasetfs.Mount(ctx, bucketName, flags)
 }
 
 func massagePath() {
@@ -203,7 +203,7 @@ func main() {
 
 		// Mount the file system.
 		var mfs *fuse.MountedFileSystem
-		var fs *Goofys
+		var fs *DatasetFS
 		fs, mfs, err = mount(
 			context.Background(),
 			bucketName,

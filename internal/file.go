@@ -79,38 +79,6 @@ func NewFileHandle(inode *Inode, opMetadata fuseops.OpMetadata) *FileHandle {
 	return fh
 }
 
-func (fh *FileHandle) initWrite() {
-	fh.writeInit.Do(func() {
-		fh.mpuWG.Add(1)
-		go fh.initMPU()
-	})
-}
-
-func (fh *FileHandle) initMPU() {
-	defer func() {
-		fh.mpuWG.Done()
-	}()
-
-	fs := fh.inode.fs
-	fh.mpuName = &fh.key
-
-	resp, err := fh.cloud.MultipartBlobBegin(&MultipartBlobBeginInput{
-		Key:         *fh.mpuName,
-		ContentType: fs.flags.GetMimeType(*fh.mpuName),
-	})
-
-	fh.mu.Lock()
-	defer fh.mu.Unlock()
-
-	if err != nil {
-		fh.lastWriteError = mapAwsError(err)
-	} else {
-		fh.mpuId = resp
-	}
-
-	return
-}
-
 func (fh *FileHandle) mpuPartNoSpawn(buf *MBuf, part uint32, total int64, last bool) (err error) {
 	fs := fh.inode.fs
 
@@ -142,42 +110,7 @@ func (fh *FileHandle) mpuPartNoSpawn(buf *MBuf, part uint32, total int64, last b
 	return
 }
 
-func (fh *FileHandle) mpuPart(buf *MBuf, part uint32, total int64) {
-	defer func() {
-		fh.mpuWG.Done()
-	}()
 
-	// maybe wait for CreateMultipartUpload
-	if fh.mpuId == nil {
-		fh.mpuWG.Wait()
-		// initMPU might have errored
-		if fh.mpuId == nil {
-			return
-		}
-	}
-
-	err := fh.mpuPartNoSpawn(buf, part, total, false)
-	if err != nil {
-		if fh.lastWriteError == nil {
-			fh.lastWriteError = err
-		}
-	}
-}
-
-func (fh *FileHandle) waitForCreateMPU() (err error) {
-	if fh.mpuId == nil {
-		fh.mu.Unlock()
-		fh.initWrite()
-		fh.mpuWG.Wait() // wait for initMPU
-		fh.mu.Lock()
-
-		if fh.lastWriteError != nil {
-			return fh.lastWriteError
-		}
-	}
-
-	return
-}
 
 func (fh *FileHandle) partSize() uint64 {
 	var size uint64
@@ -195,78 +128,6 @@ func (fh *FileHandle) partSize() uint64 {
 		size = MinUInt64(maxPartSize, size)
 	}
 	return size
-}
-
-func (fh *FileHandle) uploadCurrentBuf(parallel bool) (err error) {
-	err = fh.waitForCreateMPU()
-	if err != nil {
-		return
-	}
-
-	fh.lastPartId++
-	part := fh.lastPartId
-	buf := fh.buf
-	fh.buf = nil
-
-	if parallel {
-		fh.mpuWG.Add(1)
-		go fh.mpuPart(buf, part, fh.nextWriteOffset)
-	} else {
-		err = fh.mpuPartNoSpawn(buf, part, fh.nextWriteOffset, false)
-		if fh.lastWriteError == nil {
-			fh.lastWriteError = err
-		}
-	}
-
-	return
-}
-
-func (fh *FileHandle) WriteFile(offset int64, data []byte) (err error) {
-	fh.inode.logFuse("WriteFile", offset, len(data))
-
-	fh.mu.Lock()
-	defer fh.mu.Unlock()
-
-	if fh.lastWriteError != nil {
-		return fh.lastWriteError
-	}
-
-	if offset != fh.nextWriteOffset {
-		fh.inode.errFuse("WriteFile: only sequential writes supported", fh.nextWriteOffset, offset)
-		fh.lastWriteError = syscall.ENOTSUP
-		return fh.lastWriteError
-	}
-
-	if offset == 0 {
-		fh.poolHandle = fh.inode.fs.bufferPool
-		fh.dirty = true
-	}
-
-	for {
-		if fh.buf == nil {
-			fh.buf = MBuf{}.Init(fh.poolHandle, fh.partSize(), true)
-		}
-
-		nCopied, _ := fh.buf.Write(data)
-		fh.nextWriteOffset += int64(nCopied)
-
-		if fh.buf.Full() {
-			err = fh.uploadCurrentBuf(!fh.cloud.Capabilities().NoParallelMultipart)
-			if err != nil {
-				return
-			}
-		}
-
-		if nCopied == len(data) {
-			break
-		}
-
-		data = data[nCopied:]
-	}
-
-	fh.inode.Attributes.Size = uint64(fh.nextWriteOffset)
-
-	return
 }
 
 type S3ReadBuffer struct {
@@ -621,44 +482,6 @@ func (fh *FileHandle) readFromStream(offset int64, buf []byte) (bytesRead int, e
 	return
 }
 
-func (fh *FileHandle) flushSmallFile() (err error) {
-	buf := fh.buf
-	fh.buf = nil
-
-	if buf == nil {
-		buf = MBuf{}.Init(fh.poolHandle, 0, true)
-	}
-
-	defer buf.Free()
-
-	fs := fh.inode.fs
-
-	fs.replicators.Take(1, true)
-	defer fs.replicators.Return(1)
-
-	// we want to get key from inode because the file could have been renamed
-	_, key := fh.inode.cloud()
-	resp, err := fh.cloud.PutBlob(&PutBlobInput{
-		Key:         key,
-		Body:        buf,
-		Size:        PUInt64(uint64(buf.Len())),
-		ContentType: fs.flags.GetMimeType(*fh.inode.FullName()),
-	})
-	if err != nil {
-		fh.lastWriteError = err
-	} else {
-		inode := fh.inode
-		inode.mu.Lock()
-		defer inode.mu.Unlock()
-		if resp.ETag != nil {
-			inode.s3Metadata["etag"] = []byte(*resp.ETag)
-		}
-		if resp.StorageClass != nil {
-			inode.s3Metadata["storage-class"] = []byte(*resp.StorageClass)
-		}
-	}
-	return
-}
 
 func (fh *FileHandle) resetToKnownSize() {
 	if fh.inode.KnownSize != nil {
@@ -669,86 +492,3 @@ func (fh *FileHandle) resetToKnownSize() {
 	}
 }
 
-func (fh *FileHandle) FlushFile() (err error) {
-	fh.mu.Lock()
-	defer fh.mu.Unlock()
-
-	fh.inode.logFuse("FlushFile")
-
-	if !fh.dirty || fh.lastWriteError != nil {
-		if fh.lastWriteError != nil {
-			err = fh.lastWriteError
-			fh.resetToKnownSize()
-		}
-		return
-	}
-
-	fs := fh.inode.fs
-
-	// abort mpu on error
-	defer func() {
-		if err != nil {
-			if fh.mpuId != nil {
-				go func() {
-					_, _ = fh.cloud.MultipartBlobAbort(fh.mpuId)
-					fh.mpuId = nil
-				}()
-			}
-
-			fh.resetToKnownSize()
-		} else {
-			if fh.dirty {
-				// don't unset this if we never actually flushed
-				size := fh.inode.Attributes.Size
-				fh.inode.KnownSize = &size
-				fh.inode.Invalid = false
-			}
-			fh.dirty = false
-		}
-
-		fh.writeInit = sync.Once{}
-		fh.nextWriteOffset = 0
-		fh.lastPartId = 0
-	}()
-
-	if fh.lastPartId == 0 {
-		return fh.flushSmallFile()
-	}
-
-	fh.mpuWG.Wait()
-
-	if fh.lastWriteError != nil {
-		return fh.lastWriteError
-	}
-
-	if fh.mpuId == nil {
-		return
-	}
-
-	nParts := fh.lastPartId
-	if fh.buf != nil {
-		// upload last part
-		nParts++
-		err = fh.mpuPartNoSpawn(fh.buf, nParts, fh.nextWriteOffset, true)
-		if err != nil {
-			return
-		}
-		fh.buf = nil
-	}
-
-	_, err = fh.cloud.MultipartBlobCommit(fh.mpuId)
-	if err != nil {
-		return
-	}
-
-	fh.mpuId = nil
-
-	// we want to get key from inode because the file could have been renamed
-	_, key := fh.inode.cloud()
-	if *fh.mpuName != key {
-		// the file was renamed
-		err = fh.inode.renameObject(fs, PUInt64(uint64(fh.nextWriteOffset)), *fh.mpuName, *fh.inode.FullName())
-	}
-
-	return
-}

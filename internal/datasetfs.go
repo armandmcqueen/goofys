@@ -3,14 +3,18 @@ package internal
 import (
 	"fmt"
 	. "github.com/armandmcqueen/goofys/api/common"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/jacobsa/fuse"
 	"github.com/jacobsa/fuse/fuseops"
 	"github.com/jacobsa/fuse/fuseutil"
 	"github.com/sirupsen/logrus"
 	"io"
+	"math/rand"
+	"net/url"
 	"runtime/debug"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"bufio"
@@ -29,7 +33,7 @@ type ManifestEntry struct {
 var dfsLog = GetLogger("DatasetFS")
 
 
-func loadManifest() []ManifestEntry {
+func LoadManifest() []ManifestEntry {
 	dfsLog.Info("Loading test manifest")
 
 	csvFile, _ := os.Open("dataset_fs/manifest.csv")
@@ -104,10 +108,163 @@ type DatasetFS struct {
 	forgotCnt uint32
 }
 
+var s3Log = GetLogger("s3")
+var log = GetLogger("main")
+var fuseLog = GetLogger("fuse")
+
+
+func mapHttpError(status int) error {
+	switch status {
+	case 400:
+		return fuse.EINVAL
+	case 401:
+		return syscall.EACCES
+	case 403:
+		return syscall.EACCES
+	case 404:
+		return fuse.ENOENT
+	case 405:
+		return syscall.ENOTSUP
+	case 429:
+		return syscall.EAGAIN
+	case 500:
+		return syscall.EAGAIN
+	default:
+		return nil
+	}
+}
+
+func mapAwsError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	if awsErr, ok := err.(awserr.Error); ok {
+		switch awsErr.Code() {
+		case "BucketRegionError":
+			// don't need to log anything, we should detect region after
+			return err
+		case "NoSuchBucket":
+			return syscall.ENXIO
+		case "BucketAlreadyOwnedByYou":
+			return fuse.EEXIST
+		}
+
+		if reqErr, ok := err.(awserr.RequestFailure); ok {
+			// A service error occurred
+			err = mapHttpError(reqErr.StatusCode())
+			if err != nil {
+				return err
+			} else {
+				s3Log.Errorf("http=%v %v s3=%v request=%v\n",
+					reqErr.StatusCode(), reqErr.Message(),
+					awsErr.Code(), reqErr.RequestID())
+				return reqErr
+			}
+		} else {
+			// Generic AWS Error with Code, Message, and original error (if any)
+			s3Log.Errorf("code=%v msg=%v, err=%v\n", awsErr.Code(), awsErr.Message(), awsErr.OrigErr())
+			return awsErr
+		}
+	} else {
+		return err
+	}
+}
+
+
+type BucketSpec struct {
+	Scheme string
+	Bucket string
+	Prefix string
+}
+
+func ParseBucketSpec(bucket string) (spec BucketSpec, err error) {
+	if strings.Index(bucket, "://") != -1 {
+		var u *url.URL
+		u, err = url.Parse(bucket)
+		if err != nil {
+			return
+		}
+
+		spec.Scheme = u.Scheme
+		spec.Bucket = u.Host
+		if u.User != nil {
+			// wasb url can be wasb://container@storage-end-point
+			// we want to return the entire thing as bucket
+			spec.Bucket = u.User.String() + "@" + u.Host
+		}
+		spec.Prefix = u.Path
+	} else {
+		spec.Scheme = "s3"
+
+		colon := strings.Index(bucket, ":")
+		if colon != -1 {
+			spec.Prefix = bucket[colon+1:]
+			spec.Bucket = bucket[0:colon]
+		} else {
+			spec.Bucket = bucket
+		}
+	}
+
+	spec.Prefix = strings.Trim(spec.Prefix, "/")
+	if spec.Prefix != "" {
+		spec.Prefix += "/"
+	}
+	return
+}
+
+// from https://stackoverflow.com/questions/22892120/how-to-generate-a-random-string-of-a-fixed-length-in-golang
+func RandStringBytesMaskImprSrc(n int) string {
+	const letterBytes = "abcdefghijklmnopqrstuvwxyz0123456789"
+	const (
+		letterIdxBits = 6                    // 6 bits to represent a letter index
+		letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
+		letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
+	)
+	src := rand.NewSource(time.Now().UnixNano())
+	b := make([]byte, n)
+	// A src.Int63() generates 63 random bits, enough for letterIdxMax characters!
+	for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
+		if remain == 0 {
+			cache, remain = src.Int63(), letterIdxMax
+		}
+		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
+			b[i] = letterBytes[idx]
+			i--
+		}
+		cache >>= letterIdxBits
+		remain--
+	}
+
+	return string(b)
+}
+
+type Mount struct {
+	// Mount Point relative to goofys's root mount.
+	name    string
+	cloud   StorageBackend
+	prefix  string
+	mounted bool
+}
 
 
 
+// note that this is NOT the same as url.PathEscape in golang 1.8,
+// as this preserves / and url.PathEscape converts / to %2F
+func pathEscape(path string) string {
+	u := url.URL{Path: path}
+	return u.EscapedPath()
+}
 
+
+func makeDirEntry(en *DirHandleEntry) fuseutil.Dirent {
+	return fuseutil.Dirent{
+		Name:   en.Name,
+		Type:   en.Type,
+		Inode:  en.Inode,
+		Offset: en.Offset,
+	}
+}
 
 func NewDatasetFS(ctx context.Context, manifest []ManifestEntry) *DatasetFS {
 	cloud, err := NewManifestS3()
@@ -382,8 +539,8 @@ func (fs *DatasetFS) LookUpInode(
 
 	op.Entry.Child = inode.Id
 	op.Entry.Attributes = inode.InflateAttributes()
-	op.Entry.AttributesExpiration = time.Now().Add(fs.flags.StatCacheTTL)
-	op.Entry.EntryExpiration = time.Now().Add(fs.flags.TypeCacheTTL)
+	op.Entry.AttributesExpiration = TIME_MAX
+	op.Entry.EntryExpiration = TIME_MAX
 
 	return
 }

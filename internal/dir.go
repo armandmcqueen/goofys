@@ -118,7 +118,7 @@ func (inode *Inode) OpenDir() (dh *DirHandle) {
 		panic(fmt.Sprintf("%v is not a directory", inode.FullName()))
 	}
 
-	if isS3 && parent != nil && inode.fs.flags.TypeCacheTTL != 0 {
+	if isS3 && parent != nil {
 		parent.mu.Lock()
 		defer parent.mu.Unlock()
 
@@ -298,14 +298,11 @@ func (dh *DirHandle) listObjects(prefix string) (resp *ListBlobsOutput, err erro
 	errListChan := make(chan error, 1)
 	listChan := make(chan ListBlobsOutput, 1)
 
-	fs := dh.inode.fs
-
 	// try to list without delimiter to see if we can slurp up
 	// multiple directories
 	parent := dh.inode.Parent
 
 	if dh.Marker == nil &&
-		fs.flags.TypeCacheTTL != 0 &&
 		(parent != nil && parent.dir.seqOpenDirScore >= 2) {
 		go func() {
 			resp, err := dh.listObjectsSlurp(prefix)
@@ -338,10 +335,13 @@ func (dh *DirHandle) listObjects(prefix string) (resp *ListBlobsOutput, err erro
 		}
 	}
 
-	if !fs.flags.Cheap {
-		// invoke the fallback in parallel if desired
-		go listObjectsFlat()
-	}
+
+	// DatasetFS change - always use expensive option. May revisit if this turns out to be expensive in DL resources
+	//if !fs.flags.Cheap {
+	//	// invoke the fallback in parallel if desired
+	//	go listObjectsFlat()
+	//}
+	go listObjectsFlat()
 
 	// first see if we get anything from the slurp
 	select {
@@ -350,9 +350,9 @@ func (dh *DirHandle) listObjects(prefix string) (resp *ListBlobsOutput, err erro
 	case err = <-errSlurpChan:
 	}
 
-	if fs.flags.Cheap {
-		listObjectsFlat()
-	}
+	//if fs.flags.Cheap {
+	//	listObjectsFlat()
+	//}
 
 	// if we got an error (which may mean slurp is not applicable,
 	// wait for regular list
@@ -795,7 +795,7 @@ func appendChildName(parent, child string) string {
 	return parent + child
 }
 
-func (parent *Inode) isEmptyDir(fs *Goofys, name string) (isDir bool, err error) {
+func (parent *Inode) isEmptyDir(fs *DatasetFS, name string) (isDir bool, err error) {
 	cloud, key := parent.cloud()
 	key = appendChildName(key, name) + "/"
 
@@ -938,7 +938,7 @@ func (parent *Inode) Rename(from string, newParent *Inode, to string) (err error
 	return
 }
 
-func (parent *Inode) renameObject(fs *Goofys, size *uint64, fromFullName string, toFullName string) (err error) {
+func (parent *Inode) renameObject(fs *DatasetFS, size *uint64, fromFullName string, toFullName string) (err error) {
 	cloud, _ := parent.cloud()
 
 	_, err = cloud.RenameBlob(&RenameBlobInput{

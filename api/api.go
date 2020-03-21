@@ -20,7 +20,7 @@ var log = GetLogger("main")
 func Mount(
 	ctx context.Context,
 	bucketName string,
-	flags *FlagStorage) (fs *Goofys, mfs *fuse.MountedFileSystem, err error) {
+	flags *FlagStorage) (fs *DatasetFS, mfs *fuse.MountedFileSystem, err error) {
 
 	if flags.DebugS3 {
 		SetCloudLogLevel(logrus.DebugLevel)
@@ -40,7 +40,7 @@ func Mount(
 		mountCfg.DebugLogger = GetStdLogger(fuseLog, logrus.DebugLevel)
 	}
 
-	fs = NewGoofys(ctx, bucketName, flags)
+	fs = NewDatasetFS(ctx, internal.LoadManifest())
 	if fs == nil {
 		err = fmt.Errorf("Mount: initialization failed")
 		return
@@ -114,7 +114,7 @@ func Mount(
 func oldMount(
 	ctx context.Context,
 	bucketName string,
-	flags *FlagStorage) (fs *Goofys, mfs *fuse.MountedFileSystem, err error) {
+	flags *FlagStorage) (fs *DatasetFS, mfs *fuse.MountedFileSystem, err error) {
 
 	if flags.DebugS3 {
 		SetCloudLogLevel(logrus.DebugLevel)
@@ -201,10 +201,10 @@ func oldMount(
 					bucketName += ":" + spec.Prefix
 				}
 			}
-		}
+	}
 	}
 
-	fs = NewGoofys(ctx, bucketName, flags)
+	fs = NewDatasetFS(ctx, internal.LoadManifest())
 	if fs == nil {
 		err = fmt.Errorf("Mount: initialization failed")
 		return
@@ -275,11 +275,11 @@ func oldMount(
 // expose Goofys related functions and types for extending and mounting elsewhere
 var (
 	MassageMountFlags = internal.MassageMountFlags
-	NewGoofys         = internal.NewGoofys
+	NewDatasetFS      = internal.NewDatasetFS
 	TryUnmount        = internal.TryUnmount
 	MyUserAndGroup    = internal.MyUserAndGroup
 )
 
 type (
-	Goofys = internal.Goofys
+	DatasetFS = internal.DatasetFS
 )
