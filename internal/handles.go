@@ -192,22 +192,27 @@ func (inode *Inode) InflateAttributes() (attr fuseops.InodeAttributes) {
 		mtime = inode.fs.rootAttrs.Mtime
 	}
 
+	// TODO: May want to expose these as end-user options as goofys does
+	uid, gid := MyUserAndGroup()
+	dirMode := os.FileMode(0755)
+	fileMode := os.FileMode(0644)
+
 	attr = fuseops.InodeAttributes{
 		Size:   inode.Attributes.Size,
 		Atime:  mtime,
 		Mtime:  mtime,
 		Ctime:  mtime,
 		Crtime: mtime,
-		Uid:    inode.fs.flags.Uid,
-		Gid:    inode.fs.flags.Gid,
+		Uid:    uint32(uid),
+		Gid:    uint32(gid),
 	}
 
 	if inode.dir != nil {
 		attr.Nlink = 2
-		attr.Mode = inode.fs.flags.DirMode | os.ModeDir
+		attr.Mode = dirMode | os.ModeDir
 	} else {
 		attr.Nlink = 1
-		attr.Mode = inode.fs.flags.FileMode
+		attr.Mode = fileMode
 	}
 	return
 }
@@ -258,6 +263,7 @@ func (inode *Inode) DeRef(n uint64) (stale bool) {
 }
 
 func (inode *Inode) GetAttributes() (*fuseops.InodeAttributes, error) {
+
 	// XXX refresh attributes
 	inode.logFuse("GetAttributes")
 	if inode.Invalid {

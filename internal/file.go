@@ -522,7 +522,8 @@ func (fh *FileHandle) readFile(offset int64, buf []byte) (bytesRead int, err err
 		fh.buffers = nil
 	}
 
-	if !fs.flags.Cheap && fh.seqReadAmount >= uint64(READAHEAD_CHUNK) && fh.numOOORead < 3 {
+	//if !fs.flags.Cheap && fh.seqReadAmount >= uint64(READAHEAD_CHUNK) && fh.numOOORead < 3 {
+	if fh.seqReadAmount >= uint64(READAHEAD_CHUNK) && fh.numOOORead < 3 {
 		if fh.reader != nil {
 			fh.inode.logFuse("cutover to the parallel algorithm")
 			fh.reader.Close()
@@ -560,18 +561,19 @@ func (fh *FileHandle) Release() {
 		fh.reader.Close()
 	}
 
+	// I think the below code can be completely removed, but keeping it around temporarily because I'm not certain
 	// write buffers
-	if fh.poolHandle != nil {
-		if fh.buf != nil && fh.buf.buffers != nil {
-			if fh.lastWriteError == nil {
-				panic("buf not freed but error is nil")
-			}
-
-			fh.buf.Free()
-			// the other in-flight multipart PUT buffers will be
-			// freed when they finish/error out
-		}
-	}
+	//if fh.poolHandle != nil {
+	//	if fh.buf != nil && fh.buf.buffers != nil {
+	//		if fh.lastWriteError == nil {
+	//			panic("buf not freed but error is nil")
+	//		}
+	//
+	//		fh.buf.Free()
+	//		// the other in-flight multipart PUT buffers will be
+	//		// freed when they finish/error out
+	//	}
+	//}
 
 	fh.inode.mu.Lock()
 	defer fh.inode.mu.Unlock()
@@ -585,9 +587,7 @@ func (fh *FileHandle) Release() {
 
 func (fh *FileHandle) readFromStream(offset int64, buf []byte) (bytesRead int, err error) {
 	defer func() {
-		if fh.inode.fs.flags.DebugFuse {
-			fh.inode.logFuse("< readFromStream", bytesRead)
-		}
+		fh.inode.logFuse("< readFromStream", bytesRead)
 	}()
 
 	if uint64(offset) >= fh.inode.Attributes.Size {
@@ -612,7 +612,7 @@ func (fh *FileHandle) readFromStream(offset int64, buf []byte) (bytesRead int, e
 		if err != io.EOF {
 			fh.inode.logFuse("< readFromStream error", bytesRead, err)
 		}
-		// always retry error on read
+		// TODO(?): always retry error on read
 		fh.reader.Close()
 		fh.reader = nil
 		err = nil

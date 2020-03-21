@@ -421,174 +421,12 @@ func listBlobsSafe(cloud StorageBackend, param *ListBlobsInput) (*ListBlobsOutpu
 // LOCKS_REQUIRED(dh.mu)
 // LOCKS_EXCLUDED(dh.inode.mu)
 // LOCKS_EXCLUDED(dh.inode.fs)
-func (dh *DirHandle) ReadDir(offset fuseops.DirOffset) (en *DirHandleEntry, err error) {
-	en, ok := dh.inode.readDirFromCache(offset)
-	if ok {
-		return
-	}
+func (dh *DirHandle) ReadDir(offset fuseops.DirOffset) *DirHandleEntry {
+	// Read a single directory entry. Returns nil if the offset is larger than the number of entries in the dir
+	// TODO: Unnest into single function
 
-	parent := dh.inode
-	fs := parent.fs
+	return dh.inode.readDirFromCache(offset)
 
-	// the dir expired, so we need to fetch from the cloud. there
-	// maybe static directories that we want to keep, so cloud
-	// listing should not overwrite them. here's what we do:
-	//
-	// 1. list from cloud and add them all to the tree, remember
-	//    which one we added last
-	//
-	// 2. serve from cache
-	//
-	// 3. when we serve the entry we added last, signal that next
-	//    time we need to list from cloud again with continuation
-	//    token
-	for dh.lastFromCloud == nil && !dh.done {
-		if dh.Marker == nil {
-			// Marker, lastFromCloud are nil => We just started
-			// refreshing this directory info from cloud.
-			dh.refreshStartTime = time.Now()
-		}
-		dh.mu.Unlock()
-
-		var prefix string
-		_, prefix = dh.inode.cloud()
-		if len(prefix) != 0 {
-			prefix += "/"
-		}
-
-		resp, err := dh.listObjects(prefix)
-		if err != nil {
-			dh.mu.Lock()
-			return nil, err
-		}
-
-		s3Log.Debug(resp)
-		dh.mu.Lock()
-		parent.mu.Lock()
-		fs.mu.Lock()
-
-		// this is only returned for non-slurped responses
-		for _, dir := range resp.Prefixes {
-			// strip trailing /
-			dirName := (*dir.Prefix)[0 : len(*dir.Prefix)-1]
-			// strip previous prefix
-			dirName = dirName[len(prefix):]
-			if len(dirName) == 0 {
-				continue
-			}
-
-			if inode := parent.findChildUnlocked(dirName); inode != nil {
-				now := time.Now()
-				// don't want to update time if this
-				// inode is setup to never expire
-				if inode.AttrTime.Before(now) {
-					inode.AttrTime = now
-				}
-			} else {
-				inode := NewInode(fs, parent, &dirName)
-				inode.ToDir()
-				fs.insertInode(parent, inode)
-				// these are fake dir entries, we will
-				// realize the refcnt when lookup is
-				// done
-				inode.refcnt = 0
-			}
-
-			dh.lastFromCloud = &dirName
-		}
-
-		for _, obj := range resp.Items {
-			if !strings.HasPrefix(*obj.Key, prefix) {
-				// other slurped objects that we cached
-				continue
-			}
-
-			baseName := (*obj.Key)[len(prefix):]
-
-			slash := strings.Index(baseName, "/")
-			if slash == -1 {
-				if len(baseName) == 0 {
-					// shouldn't happen
-					continue
-				}
-
-				inode := parent.findChildUnlocked(baseName)
-				if inode == nil {
-					inode = NewInode(fs, parent, &baseName)
-					// these are fake dir entries,
-					// we will realize the refcnt
-					// when lookup is done
-					inode.refcnt = 0
-					fs.insertInode(parent, inode)
-				}
-				inode.SetFromBlobItem(&obj)
-			} else {
-				// this is a slurped up object which
-				// was already cached
-				baseName = baseName[:slash]
-			}
-
-			if dh.lastFromCloud == nil ||
-				strings.Compare(*dh.lastFromCloud, baseName) < 0 {
-				dh.lastFromCloud = &baseName
-			}
-		}
-
-		parent.mu.Unlock()
-		fs.mu.Unlock()
-
-		if resp.IsTruncated {
-			dh.Marker = resp.NextContinuationToken
-		} else {
-			dh.Marker = nil
-			dh.done = true
-			break
-		}
-	}
-
-	parent.mu.Lock()
-	defer parent.mu.Unlock()
-
-	// Find the first non-stale child inode with offset >= `offset`.
-	var child *Inode
-	for int(offset) < len(parent.dir.Children) {
-		// Note on locking: See comments at Inode::AttrTime, Inode::Parent.
-		childTmp := parent.dir.Children[offset]
-		if childTmp.AttrTime.Before(dh.refreshStartTime) {
-			// childTmp.AttrTime < dh.refreshStartTime => the child entry was not
-			// updated from cloud by this dir Handle.
-			// So this is a stale entry that should be removed.
-			childTmp.Parent = nil
-			parent.removeChildUnlocked(childTmp)
-		} else {
-			// Found a non-stale child inode.
-			child = childTmp
-			break
-		}
-	}
-
-	if child == nil {
-		// we've reached the end
-		parent.dir.DirTime = time.Now()
-		parent.Attributes.Mtime = parent.findChildMaxTime()
-		return nil, nil
-	}
-
-	en = &DirHandleEntry{
-		Name:   *child.Name,
-		Inode:  child.Id,
-		Offset: fuseops.DirOffset(offset) + 1,
-	}
-	if child.isDir() {
-		en.Type = fuseutil.DT_Directory
-	} else {
-		en.Type = fuseutil.DT_File
-	}
-
-	if dh.lastFromCloud != nil && en.Name == *dh.lastFromCloud {
-		dh.lastFromCloud = nil
-	}
-	return en, nil
 }
 
 func (dh *DirHandle) CloseDir() error {
@@ -1247,34 +1085,33 @@ func (parent *Inode) findChildMaxTime() time.Time {
 	return maxTime
 }
 
-func (parent *Inode) readDirFromCache(offset fuseops.DirOffset) (en *DirHandleEntry, ok bool) {
-	parent.mu.Lock()
-	defer parent.mu.Unlock()
+
+// Read a single directory entry. Returns nil if the offset is larger than the number of entries in the dir
+func (parent *Inode) readDirFromCache(offset fuseops.DirOffset) *DirHandleEntry {
 
 	if parent.dir == nil {
 		panic(*parent.FullName())
 	}
-	if !expired(parent.dir.DirTime, parent.fs.flags.TypeCacheTTL) {
-		ok = true
 
-		if int(offset) >= len(parent.dir.Children) {
-			return
-		}
-		child := parent.dir.Children[offset]
-
-		en = &DirHandleEntry{
-			Name:   *child.Name,
-			Inode:  child.Id,
-			Offset: offset + 1,
-		}
-		if child.isDir() {
-			en.Type = fuseutil.DT_Directory
-		} else {
-			en.Type = fuseutil.DT_File
-		}
-
+	// nil return indicates that the max offset has been exceeded
+	if int(offset) >= len(parent.dir.Children) {
+		return nil
 	}
-	return
+	child := parent.dir.Children[offset]
+
+	en := &DirHandleEntry{
+		Name:   *child.Name,
+		Inode:  child.Id,
+		Offset: offset + 1,
+	}
+	if child.isDir() {
+		en.Type = fuseutil.DT_Directory
+	} else {
+		en.Type = fuseutil.DT_File
+	}
+
+	return en
+
 }
 
 func (parent *Inode) LookUpInodeNotDir(name string, c chan HeadBlobOutput, errc chan error) {

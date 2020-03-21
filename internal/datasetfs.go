@@ -59,6 +59,7 @@ func loadManifest() []ManifestEntry {
 
 type DatasetFS struct {
 	fuseutil.NotImplementedFileSystem
+
 	bucket string
 
 	manifest []ManifestEntry
@@ -460,7 +461,6 @@ func (fs *DatasetFS) ReadDir(
 	ctx context.Context,
 	op *fuseops.ReadDirOp) (err error) {
 
-	// Find the handle.
 	fs.mu.RLock()
 	dh := fs.dirHandles[op.Handle]
 	fs.mu.RUnlock()
@@ -472,14 +472,12 @@ func (fs *DatasetFS) ReadDir(
 	inode := dh.inode
 	inode.logFuse("ReadDir", op.Offset)
 
-	dh.mu.Lock()
-	defer dh.mu.Unlock()
+	// I'm almost certain we don't need this locking now that DirHandle no longer checks against the cloud
+	//dh.mu.Lock()
+	//defer dh.mu.Unlock()
 
 	for i := op.Offset; ; i++ {
-		e, err := dh.ReadDir(i)
-		if err != nil {
-			return err
-		}
+		e := dh.ReadDir(i)
 		if e == nil {
 			break
 		}
@@ -588,7 +586,7 @@ func (fs *DatasetFS) SetInodeAttributes(
 	attr, err := inode.GetAttributes()
 	if err == nil {
 		op.Attributes = *attr
-		op.AttributesExpiration = time.Now().Add(fs.flags.StatCacheTTL)
+		op.AttributesExpiration = TIME_MAX
 	}
 	return
 }
